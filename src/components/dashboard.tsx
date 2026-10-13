@@ -1,126 +1,197 @@
 "use client";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import type {
+  Asset,
+  Connection,
+  Draft,
+  Job,
+  JobStatus,
+} from "@/lib/workflow/types";
+import RemoteBrowser from "./remote-browser";
+import DraftPreview from "./draft-preview";
 
-import { useEffect, useState, type FormEvent } from "react";
-import type { Profile, Post, ImageRecord } from "@/lib/db";
-
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, options);
+export type AssetView = Pick<Asset, "id" | "ordinal" | "width" | "height"> & {
+  name: string;
+  upscaled: boolean;
+  url: string;
+};
+export type Detail = {
+  job: Job;
+  assets: AssetView[];
+  events: { status: string; message: string; created_at: string }[];
+  history: Connection["history"];
+};
+type Readiness = {
+  aiConnected: boolean;
+  automaticPublishingEnabled: boolean;
+  saveFromVerified: boolean;
+  stickerVerified: boolean;
+  connection: Connection;
+};
+export const labels: Record<JobStatus, string> = {
+  uploading: "사진 저장 중",
+  queued: "대기 중",
+  extracting: "사진 추출 중",
+  waiting_images: "사진 확인 필요",
+  processing: "사진 확대 중",
+  writing: "초안 작성 중",
+  awaiting_ai: "직접 작성 가능",
+  ready: "초안 준비 완료",
+  duplicate: "중복 감지",
+  preparing_editor: "편집기 준비 중",
+  manual_completion: "공식 화면에서 완료",
+  publishing: "발행 중",
+  verification_required: "기존 글 확인 필요",
+  published: "발행 확인 완료",
+  failed: "작업 중단",
+};
+class ApiFailure extends Error {
+  job: Job | null;
+  constructor(message: string, job?: Job) {
+    super(message);
+    this.job = job || null;
+  }
+}
+export async function api<T>(path: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(`/api${path}`, options);
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "요청에 실패했습니다.");
+  if (response.status === 401) {
+    window.location.assign("/login");
+    throw new Error("다시 접속해 주세요.");
+  }
+  if (!response.ok)
+    throw new ApiFailure(
+      result.error || "작업을 완료하지 못했습니다.",
+      result.job,
+    );
   return result;
 }
+export const post = (body?: unknown): RequestInit => ({
+  method: "POST",
+  headers: body ? { "content-type": "application/json" } : undefined,
+  body: body ? JSON.stringify(body) : undefined,
+});
 
 export default function Dashboard() {
-  const [tab, setTab] = useState<"content" | "account">("content");
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [images, setImages] = useState<ImageRecord[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState<"work" | "naver" | "history">("work");
+  const [readiness, setReadiness] = useState<Readiness | null>(null);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [detail, setDetail] = useState<Detail | null>(null);
+  const selectedRef = useRef<string | null>(null);
+  function chooseJob(id: string) {
+    selectedRef.current = id;
+    setSelected(id);
+    setDetail(null);
+  }
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const [failed, setFailed] = useState(false);
-  const [url, setUrl] = useState("");
-  const [blogId, setBlogId] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [categoryText, setCategoryText] = useState("일상, 여행, 맛집");
-  const [selectedCategory, setSelectedCategory] = useState("일상");
-  const categories = [
-    ...new Set(
-      categoryText
-        .split(/[,\n]/)
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  ];
-
+  const [error, setError] = useState(false);
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [caption, setCaption] = useState("");
+  const [location, setLocation] = useState("");
+  const [salon, setSalon] = useState("");
+  const [treatments, setTreatments] = useState("");
+  const [rights, setRights] = useState(false);
+  const [auto, setAuto] = useState(false);
+  const upload = useRef<HTMLInputElement>(null);
+  const requestId = useRef<string | null>(null);
+  async function refresh(id = selectedRef.current) {
+    const [status, record] = await Promise.all([
+      api<Readiness>("/status"),
+      api<{ jobs: Job[] }>("/jobs"),
+    ]);
+    setReadiness(status);
+    setJobs(record.jobs);
+    if (id) {
+      const next = await api<Detail>(`/jobs/${id}`);
+      if (selectedRef.current === id) setDetail(next);
+    }
+  }
   useEffect(() => {
-    Promise.all([
-      request<{ profile: Profile | null }>("/api/profile"),
-      request<{ posts: Post[] }>("/api/posts"),
-      request<{ images: ImageRecord[] }>("/api/images"),
-    ])
-      .then(([account, content, assets]) => {
-        setProfile(account.profile);
-        setPosts(content.posts);
-        setImages(assets.images);
-        if (account.profile) {
-          setBlogId(account.profile.blogId);
-          setDisplayName(account.profile.displayName);
-          setCategoryText(account.profile.categories.join(", "));
-          setSelectedCategory(account.profile.selectedCategory);
-        }
-      })
-      .catch((error: Error) => {
-        setFailed(true);
-        setMessage(error.message);
-      })
-      .finally(() => setLoading(false));
-  }, []);
-
-  async function perform(action: () => Promise<void>) {
+    let cancelled = false;
+    const load = () => {
+      if (!cancelled)
+        void refresh(selected).catch((error: Error) => {
+          if (!cancelled) {
+            setMessage(error.message);
+            setError(true);
+          }
+        });
+    };
+    load();
+    const timer = setInterval(load, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [selected]);
+  async function run(action: () => Promise<void>) {
     setBusy(true);
     setMessage("");
-    setFailed(false);
+    setError(false);
     try {
       await action();
+      await refresh();
+      return true;
     } catch (error) {
-      setFailed(true);
+      setError(true);
+      if (error instanceof ApiFailure && error.job) {
+        chooseJob(error.job.id);
+        try {
+          setDetail(await api<Detail>(`/jobs/${error.job.id}`));
+        } catch {}
+      }
       setMessage(
-        error instanceof Error ? error.message : "요청에 실패했습니다.",
+        error instanceof Error ? error.message : "작업을 완료하지 못했습니다.",
       );
+      return false;
     } finally {
       setBusy(false);
     }
   }
-  function saveAccount(event: FormEvent<HTMLFormElement>) {
+  async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void perform(async () => {
-      const result = await request<{ profile: Profile }>("/api/profile", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          blogId,
-          displayName,
-          categories,
-          selectedCategory,
+    await run(async () => {
+      requestId.current ||= crypto.randomUUID();
+      const body = new FormData();
+      body.set("requestId", requestId.current);
+      body.set(
+        "input",
+        JSON.stringify({
+          sourceUrl,
+          caption,
+          location,
+          salon,
+          confirmedTreatments: treatments,
+          rightsConfirmed: rights,
+          mode: auto ? "publish" : "draft",
         }),
-      });
-      setProfile(result.profile);
+      );
+      for (const file of Array.from(upload.current?.files || []))
+        body.append("images", file);
+      const data = await api<{ job: Job }>("/jobs", { method: "POST", body });
+      chooseJob(data.job.id);
+      setDetail(await api<Detail>(`/jobs/${data.job.id}`));
+      requestId.current = null;
+      setSourceUrl("");
+      setCaption("");
+      setRights(false);
+      if (upload.current) upload.current.value = "";
       setMessage(
-        "블로그 설정을 저장했습니다. 실제 네이버 로그인은 다음 단계에서 진행합니다.",
+        "작업을 시작했습니다. 진행 상태와 준비된 사진을 아래에서 확인하세요.",
       );
     });
   }
-  function addPost(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    void perform(async () => {
-      const result = await request<{ post: Post }>("/api/posts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
-      });
-      setPosts((items) => [result.post, ...items].slice(0, 100));
-      setUrl("");
-      setMessage(
-        "콘텐츠를 등록했습니다. 수집과 글 작성은 다음 단계에서 지원합니다.",
-      );
+  const connection = readiness?.connection;
+  const activeBlog = connection?.blogs.find(
+    (blog) => blog.id === connection.selectedBlog,
+  );
+  async function selectBlog(blogId: string, categoryId: string) {
+    await run(async () => {
+      await api("/naver/select", post({ blogId, categoryId }));
     });
   }
-  function uploadImage(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const body = new FormData(form);
-    void perform(async () => {
-      const result = await request<{ images: ImageRecord[] }>("/api/images", {
-        method: "POST",
-        body,
-      });
-      setImages(result.images);
-      form.reset();
-      setMessage("이미지 중복 검사 정보를 등록했습니다.");
-    });
-  }
-
   return (
     <div className="shell">
       <aside className="sidebar">
@@ -131,342 +202,784 @@ export default function Dashboard() {
           </span>
         </a>
         <div className="workspace">
-          MY WORKSPACE<span>개인 콘텐츠 관리</span>
+          MY WORKSPACE<span>사진에서 시작하는 블로그</span>
         </div>
         <nav aria-label="관리 메뉴">
-          <button
-            className={tab === "content" ? "active" : ""}
-            onClick={() => setTab("content")}
-          >
-            <span aria-hidden="true">▦</span> 콘텐츠 관리
-          </button>
-          <button
-            className={tab === "account" ? "active" : ""}
-            onClick={() => setTab("account")}
-          >
-            <span aria-hidden="true">◎</span> 블로그 연결
-          </button>
+          {(
+            [
+              ["work", "콘텐츠 만들기", "▦"],
+              ["naver", "네이버 연결", "◎"],
+              ["history", "작업 기록", "↗"],
+            ] as const
+          ).map(([key, title, icon]) => (
+            <button
+              key={key}
+              className={tab === key ? "active" : ""}
+              onClick={() => setTab(key)}
+            >
+              <span aria-hidden="true">{icon}</span>
+              {title}
+            </button>
+          ))}
         </nav>
         <div className="sidebar-note">
           <span className="dot" />
-          개발 미리보기
-          <p>
-            등록한 콘텐츠는 초안으로 보관됩니다. 자동 발행은 아직 실행되지
-            않습니다.
-          </p>
+          관리자 전용
+          <p>비밀번호를 저장하지 않고 네이버 공식 화면에서 연결합니다.</p>
         </div>
         <div className="sidebar-footer">
-          사진에서 시작하는
-          <br />
-          나만의 블로그 이야기.
+          <button
+            className="link-button"
+            onClick={() =>
+              void run(async () => {
+                await api("/auth/logout", post());
+                window.location.assign("/login");
+              })
+            }
+          >
+            사이트 로그아웃
+          </button>
         </div>
       </aside>
       <main>
         <header className="topbar">
           <span>
-            워크스페이스 <span className="separator">/</span>{" "}
-            {tab === "content" ? "콘텐츠 관리" : "블로그 연결"}
+            내 스튜디오 /{" "}
+            {tab === "work"
+              ? "콘텐츠 만들기"
+              : tab === "naver"
+                ? "네이버 연결"
+                : "작업 기록"}
           </span>
-          <span className="version">v0.1 · 개발 단계</span>
+          <span className="version">비공개 워크스페이스</span>
         </header>
         <div className="main-content">
           <div className="page-heading">
             <div>
-              <p className="eyebrow">YOUR CONTENT, ONE PLACE</p>
-              <h1>{tab === "content" ? "콘텐츠 관리" : "블로그 연결"}</h1>
+              <p className="eyebrow">PHOTOS TO YOUR NEXT STORY</p>
+              <h1>
+                {tab === "work"
+                  ? "새로운 블로그 이야기"
+                  : tab === "naver"
+                    ? "네이버 연결"
+                    : "작업 기록"}
+              </h1>
               <p>
-                {tab === "content"
-                  ? "좋은 사진을 모으고, 다음 블로그 이야기를 준비하세요."
-                  : "글을 보낼 블로그와 카테고리를 먼저 등록하세요."}
+                {tab === "work"
+                  ? "사진을 준비하고, 사실에 맞는 글을 확인하세요."
+                  : tab === "naver"
+                    ? "아이디와 비밀번호는 공식 네이버 화면에서만 입력합니다."
+                    : "중단된 작업도 기록을 유지하며 안전하게 이어갑니다."}
               </p>
             </div>
             <span className="status-pill">
               <span className="dot" />
-              로컬 워크스페이스
+              {connection?.connected ? "네이버 연결됨" : "네이버 연결 전"}
             </span>
           </div>
           {message && (
             <div
-              role={failed ? "alert" : "status"}
-              className={`notice ${failed ? "error" : "success"}`}
+              className={`notice ${error ? "error" : "success"}`}
+              role={error ? "alert" : "status"}
             >
               {message}
             </div>
           )}
-          {loading ? (
-            <p role="status">워크스페이스를 불러오는 중입니다…</p>
-          ) : (
+          {readiness && (
+            <div className="capability-row">
+              <span>
+                {readiness.aiConnected
+                  ? "AI 설정 등록됨"
+                  : "AI 연결 대기 · 직접 작성 가능"}
+              </span>
+              <span>
+                {readiness.automaticPublishingEnabled
+                  ? "자동 발행 사용 가능"
+                  : "자동 발행 제한 · 공식 화면에서 수동 완료"}
+              </span>
+            </div>
+          )}
+          {tab === "naver" && (
             <>
-              <div className="stats">
-                <div>
-                  <span>등록한 콘텐츠</span>
-                  <strong>
-                    {posts.length}
-                    <small>개</small>
-                  </strong>
-                  <p>최근 100개 기준</p>
+              <section className="card">
+                <div className="section-heading">
+                  <div>
+                    <h2>내 네이버 계정</h2>
+                    <p>로그인 후 본인 블로그와 카테고리를 확인합니다.</p>
+                  </div>
+                  <span className="badge">
+                    {connection?.connected ? "연결됨" : "연결 전"}
+                  </span>
                 </div>
-                <div>
-                  <span>검사한 이미지</span>
-                  <strong>
-                    {images.length}
-                    <small>장</small>
-                  </strong>
-                  <p>중복 없이 등록된 이미지 · 최근 100개</p>
+                <div className="info-box">
+                  아래 공식 네이버 화면을 열어 직접 로그인해 주세요. 인증 문자나
+                  보안 확인이 나오면 그대로 완료합니다. 보안 절차를 우회하지
+                  않으며, 로그인 세션만 암호화해 보관합니다.
                 </div>
-                <div>
-                  <span>네이버 연결</span>
-                  <strong className="text-stat">로그인 대기</strong>
-                  <p>
-                    {profile
-                      ? `${profile.displayName} · 설정 등록됨`
-                      : "블로그 설정을 등록해 주세요"}
-                  </p>
+                <div className="button-row">
+                  <button
+                    className="primary-button"
+                    disabled={busy}
+                    onClick={() =>
+                      void run(async () => {
+                        await api("/naver/login", post());
+                        setMessage(
+                          "공식 네이버 화면을 열었습니다. 화면에서 로그인한 뒤 로그인 완료 확인을 누르세요.",
+                        );
+                      })
+                    }
+                  >
+                    공식 네이버 로그인 열기
+                  </button>
+                  <button
+                    className="secondary-button"
+                    disabled={busy || !connection?.browserOpen}
+                    onClick={() =>
+                      void run(async () => {
+                        await api("/naver/confirm", post());
+                        setMessage("본인 블로그와 카테고리를 불러왔습니다.");
+                      })
+                    }
+                  >
+                    로그인 완료 확인
+                  </button>
+                  <button
+                    className="link-button"
+                    disabled={busy || !connection?.browserOpen}
+                    onClick={() =>
+                      void run(async () => {
+                        await api("/naver/logout", post());
+                      })
+                    }
+                  >
+                    연결 해제
+                  </button>
                 </div>
-              </div>
-              {tab === "account" ? (
-                <section className="card account-card">
-                  <div className="section-heading">
+              </section>
+              {connection?.browserOpen && (
+                <RemoteBrowser
+                  officialUrl={connection.officialUrl}
+                  onError={(text) => {
+                    setError(true);
+                    setMessage(text);
+                  }}
+                />
+              )}
+              <section className="card">
+                <h2>블로그와 카테고리</h2>
+                {connection?.blogs.length ? (
+                  <div className="account-form selection-form">
                     <div>
-                      <h2>네이버 블로그 설정</h2>
-                      <p>비밀번호 없이 블로그 정보만 저장합니다.</p>
-                    </div>
-                    <span className="badge">미연결</span>
-                  </div>
-                  <div className="info-box">
-                    현재는 연결 준비 단계입니다. 카테고리는 직접 등록하며, 실제
-                    로그인과 네이버 카테고리 조회는 다음 단계에서 지원합니다.
-                  </div>
-                  <form onSubmit={saveAccount} className="account-form">
-                    <label>
-                      블로그 이름
-                      <input
-                        required
-                        maxLength={50}
-                        value={displayName}
-                        onChange={(event) => setDisplayName(event.target.value)}
-                        placeholder="예: 나의 여행 기록"
-                      />
-                    </label>
-                    <label>
-                      블로그 ID
-                      <input
-                        required
-                        minLength={2}
-                        maxLength={50}
-                        pattern="[a-zA-Z0-9_-]+"
-                        value={blogId}
-                        onChange={(event) => setBlogId(event.target.value)}
-                        placeholder="blog.naver.com/ 뒤의 ID"
-                      />
-                    </label>
-                    <label className="full">
-                      카테고리 직접 등록
-                      <input
-                        required
-                        value={categoryText}
-                        onChange={(event) => {
-                          const text = event.target.value;
-                          setCategoryText(text);
-                          const next = text
-                            .split(/[,\n]/)
-                            .map((item) => item.trim())
-                            .filter(Boolean);
-                          if (!next.includes(selectedCategory))
-                            setSelectedCategory(next[0] || "");
-                        }}
-                        placeholder="일상, 여행, 맛집"
-                      />
-                      <small>
-                        쉼표로 구분해 입력하세요. 네이버에 실제 존재하는
-                        카테고리와 이후 연결합니다.
-                      </small>
-                    </label>
-                    <div className="full">
-                      <label htmlFor="selected-category">기본 카테고리</label>
+                      <label htmlFor="blog-select">블로그 선택</label>
                       <select
-                        id="selected-category"
-                        required
-                        value={selectedCategory}
-                        onChange={(event) =>
-                          setSelectedCategory(event.target.value)
-                        }
+                        id="blog-select"
+                        value={connection.selectedBlog || ""}
+                        disabled={busy}
+                        onChange={(event) => {
+                          const blog = connection.blogs.find(
+                            (item) => item.id === event.target.value,
+                          )!;
+                          void selectBlog(blog.id, blog.categories[0].id);
+                        }}
                       >
-                        {categories.map((category) => (
-                          <option key={category}>{category}</option>
+                        {connection.blogs.map((blog) => (
+                          <option value={blog.id} key={blog.id}>
+                            {blog.name}
+                          </option>
                         ))}
                       </select>
                     </div>
-                    <div className="form-footer full">
-                      <span>로그인 비밀번호와 API 키는 필요하지 않습니다.</span>
-                      <button disabled={busy} type="submit">
-                        {busy ? "저장 중…" : "블로그 설정 저장"}
-                      </button>
-                    </div>
-                  </form>
-                </section>
-              ) : (
-                <>
-                  <div className="input-grid">
-                    <section className="card">
-                      <div className="section-heading">
-                        <div>
-                          <span className="step">01 / SOURCE</span>
-                          <h2>인스타그램 콘텐츠 추가</h2>
-                          <p>게시물 또는 릴스 링크를 등록하세요.</p>
-                        </div>
-                        <span className="source-icon">↗</span>
-                      </div>
-                      {!profile && (
-                        <p className="setup-note">
-                          먼저{" "}
-                          <button onClick={() => setTab("account")}>
-                            블로그 설정을 등록
-                          </button>
-                          하세요.
-                        </p>
-                      )}
-                      <form onSubmit={addPost}>
-                        <label htmlFor="instagram-url">인스타그램 URL</label>
-                        <input
-                          id="instagram-url"
-                          type="url"
-                          required
-                          value={url}
-                          onChange={(event) => setUrl(event.target.value)}
-                          placeholder="https://www.instagram.com/p/..."
-                        />
-                        <div className="form-footer">
-                          <span>
-                            {profile
-                              ? `기본 카테고리: ${profile.selectedCategory}`
-                              : "게시물·릴스 링크 지원"}
-                          </span>
-                          <button disabled={busy || !profile} type="submit">
-                            콘텐츠 등록 <span>＋</span>
-                          </button>
-                        </div>
-                      </form>
-                    </section>
-                    <section className="card">
-                      <div className="section-heading">
-                        <div>
-                          <span className="step">02 / IMAGE CHECK</span>
-                          <h2>이미지 중복 검사</h2>
-                          <p>등록한 이미지와 같은 사진인지 확인합니다.</p>
-                        </div>
-                        <span className="source-icon">▧</span>
-                      </div>
-                      <form onSubmit={uploadImage}>
-                        <label htmlFor="image">검사할 이미지</label>
-                        <input
-                          id="image"
-                          name="image"
-                          type="file"
-                          accept="image/jpeg,image/png,image/webp"
-                          required
-                        />
-                        <div className="form-footer">
-                          <span>JPG, PNG, WebP · 최대 10MB</span>
-                          <button type="submit" disabled={busy}>
-                            검사 및 등록
-                          </button>
-                        </div>
-                      </form>
-                    </section>
-                  </div>
-                  <section className="card content-list">
-                    <div className="section-heading">
-                      <div>
-                        <h2>
-                          콘텐츠 보관함{" "}
-                          <span className="count">{posts.length}</span>
-                        </h2>
-                        <p>등록한 링크를 저장하고 중복 등록을 방지합니다.</p>
-                      </div>
-                      <span className="badge neutral">최근 100개</span>
-                    </div>
-                    {posts.length === 0 ? (
-                      <div className="empty-state">
-                        <div>↗</div>
-                        <h3>첫 번째 이야기를 준비해 보세요</h3>
-                        <p>
-                          인스타그램 링크를 등록하면 이곳에 콘텐츠가 표시됩니다.
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="table-scroll">
-                        <table>
-                          <thead>
-                            <tr>
-                              <th>콘텐츠 링크</th>
-                              <th>카테고리</th>
-                              <th>상태</th>
-                              <th>등록일</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {posts.map((post) => (
-                              <tr key={post.id}>
-                                <td>
-                                  <a
-                                    href={post.source_url}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                  >
-                                    {post.source_url}
-                                  </a>
-                                </td>
-                                <td>{post.category}</td>
-                                <td>
-                                  <span className="badge neutral">초안</span>
-                                </td>
-                                <td>
-                                  {new Date(post.created_at).toLocaleDateString(
-                                    "ko-KR",
-                                    { timeZone: "Asia/Seoul" },
-                                  )}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </section>
-                  {images.length > 0 && (
-                    <section className="card image-list">
-                      <h2>등록한 이미지</h2>
-                      <ul>
-                        {images.slice(0, 10).map((item) => (
-                          <li key={item.id}>
-                            <span>{item.original_name}</span>
-                            <small>
-                              {item.width} × {item.height} · 중복 검사 완료
-                            </small>
-                          </li>
+                    <div>
+                      <label htmlFor="category-select">게시판 선택</label>
+                      <select
+                        id="category-select"
+                        value={connection.selectedCategory || ""}
+                        disabled={busy}
+                        onChange={(event) =>
+                          void selectBlog(
+                            connection.selectedBlog!,
+                            event.target.value,
+                          )
+                        }
+                      >
+                        {activeBlog?.categories.map((category) => (
+                          <option value={category.id} key={category.id}>
+                            {category.name}
+                          </option>
                         ))}
-                      </ul>
-                      <p className="hint">
-                        파일 내용과 디코딩된 픽셀을 비교합니다. 크기
-                        변경·크롭·재압축된 사진의 유사도 검사는 다음 단계입니다.
-                        원본 파일은 보관하지 않습니다.
-                      </p>
-                    </section>
+                      </select>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="hint">
+                    공식 로그인을 완료하면 이곳에 본인 블로그와 카테고리가
+                    표시됩니다.
+                  </p>
+                )}
+              </section>
+              <section className="card">
+                <h2>기존 게시물 비교</h2>
+                <p className="hint">{connection?.history.message}</p>
+                <button
+                  className="secondary-button"
+                  disabled={busy || !connection?.connected}
+                  onClick={() =>
+                    void run(async () => {
+                      await api("/naver/history", post());
+                      setMessage(
+                        "기존 글 비교를 시작했습니다. 전체 기록을 확인하지 못하면 자동 발행하지 않습니다.",
+                      );
+                    })
+                  }
+                >
+                  기존 네이버 발행 기록 비교
+                </button>
+              </section>
+            </>
+          )}
+          {tab === "work" && (
+            <>
+              <section className="card">
+                <div className="section-heading">
+                  <div>
+                    <span className="step">01 / START A STORY</span>
+                    <h2>사진과 콘텐츠 준비</h2>
+                    <p>링크를 입력하거나 원본 사진을 직접 올려 주세요.</p>
+                  </div>
+                  <span className="badge neutral">초안 모드 기본</span>
+                </div>
+                {!connection?.connected && (
+                  <p className="setup-note">
+                    <button onClick={() => setTab("naver")}>
+                      네이버 계정을 먼저 연결
+                    </button>
+                    하면 카테고리에 맞춰 준비할 수 있습니다. 연결 전에는 사진과
+                    초안만 준비할 수 있습니다.
+                  </p>
+                )}
+                <form onSubmit={create} className="account-form">
+                  <div className="full">
+                    <label htmlFor="source-url">인스타그램 URL</label>
+                    <input
+                      id="source-url"
+                      type="url"
+                      value={sourceUrl}
+                      maxLength={2048}
+                      onChange={(event) => {
+                        setSourceUrl(event.target.value);
+                        requestId.current = null;
+                      }}
+                      placeholder="https://www.instagram.com/p/..."
+                    />
+                    <p className="hint">
+                      SaveFrom을 우선 시도합니다. 보안 확인·전체 사진 누락
+                      가능성이 있으면 직접 업로드로 안내합니다.
+                    </p>
+                  </div>
+                  <div className="full">
+                    <label htmlFor="photos-upload">
+                      원본 사진 직접 업로드 (여러 장 가능)
+                    </label>
+                    <input
+                      ref={upload}
+                      id="photos-upload"
+                      type="file"
+                      multiple
+                      accept="image/jpeg,image/png,image/webp"
+                      onChange={() => {
+                        requestId.current = null;
+                      }}
+                    />
+                    <p className="hint">
+                      JPG · PNG · WebP, 각 10MB 이하 · 최대 20장 · 총 80MB 이하.
+                      업로드 순서대로 글에 배치합니다.
+                    </p>
+                  </div>
+                  <div className="full">
+                    <label htmlFor="caption">
+                      인스타그램 본문 또는 사진 설명
+                    </label>
+                    <textarea
+                      id="caption"
+                      value={caption}
+                      maxLength={8000}
+                      rows={4}
+                      onChange={(event) => setCaption(event.target.value)}
+                      placeholder="원래 게시물 본문을 붙여 넣거나 사진에 대해 확인한 내용을 적어 주세요."
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="salon">매장명 (선택)</label>
+                    <input
+                      id="salon"
+                      value={salon}
+                      maxLength={100}
+                      onChange={(event) => setSalon(event.target.value)}
+                      placeholder="확인된 매장 이름"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="location">지역 키워드 (선택)</label>
+                    <input
+                      id="location"
+                      value={location}
+                      maxLength={100}
+                      onChange={(event) => setLocation(event.target.value)}
+                      placeholder="예: 서울 성수동"
+                    />
+                  </div>
+                  <div className="full">
+                    <label htmlFor="treatments">확인된 시술 사실 (선택)</label>
+                    <textarea
+                      id="treatments"
+                      value={treatments}
+                      maxLength={2000}
+                      rows={2}
+                      onChange={(event) => setTreatments(event.target.value)}
+                      placeholder="실제로 확인한 시술만 적어 주세요. 모르면 비워 두세요."
+                    />
+                  </div>
+                  <label className="check-label full">
+                    <input
+                      type="checkbox"
+                      required
+                      checked={rights}
+                      onChange={(event) => setRights(event.target.checked)}
+                    />
+                    제가 소유하거나 사용 허락을 받은 사진이며, 입력한 시술
+                    정보는 확인한 사실입니다.
+                  </label>
+                  <label className="check-label full">
+                    <input
+                      type="checkbox"
+                      checked={auto}
+                      disabled={!readiness?.automaticPublishingEnabled}
+                      onChange={(event) => setAuto(event.target.checked)}
+                    />
+                    자동 발행을 명시적으로 활성화합니다.{" "}
+                    {readiness?.automaticPublishingEnabled
+                      ? ""
+                      : "(실제 네이버 검증 전에는 사용할 수 없습니다.)"}
+                  </label>
+                  <div className="form-footer full">
+                    <span>
+                      사진 2배 확대 → 중복 검사 → 글 초안 → 확인 및 완료
+                    </span>
+                    <button
+                      type="submit"
+                      disabled={busy || !readiness || !rights}
+                    >
+                      {busy ? "작업 등록 중…" : "자동화 시작"}
+                    </button>
+                  </div>
+                </form>
+              </section>
+              {detail && (
+                <JobPanel
+                  key={detail.job.id}
+                  detail={detail}
+                  busy={busy}
+                  publishingEnabled={Boolean(
+                    readiness?.automaticPublishingEnabled,
                   )}
-                </>
+                  run={run}
+                  selectJob={chooseJob}
+                  showNaver={() => setTab("naver")}
+                />
               )}
             </>
           )}
+          {(tab === "history" || tab === "work") && (
+            <section className="card content-list">
+              <div className="section-heading">
+                <div>
+                  <h2>
+                    작업 보관함 <span className="count">{jobs.length}</span>
+                  </h2>
+                  <p>
+                    최근 100개 작업을 표시합니다. 동일 URL은 새 작업으로
+                    재등록하지 않습니다.
+                  </p>
+                </div>
+              </div>
+              {!jobs.length ? (
+                <div className="empty-state">
+                  <h3>첫 번째 이야기를 준비해 보세요</h3>
+                  <p>사진을 올리면 확대 결과와 작성 상태가 표시됩니다.</p>
+                </div>
+              ) : (
+                <div className="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>콘텐츠</th>
+                        <th>상태</th>
+                        <th>카테고리</th>
+                        <th>발행 글</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {jobs.map((job) => (
+                        <tr key={job.id}>
+                          <td>
+                            <button
+                              className="link-button"
+                              onClick={() => {
+                                chooseJob(job.id);
+                                setTab("work");
+                              }}
+                            >
+                              {job.draft?.title ||
+                                (job.source_url.startsWith("upload:")
+                                  ? "직접 업로드한 사진"
+                                  : job.source_url)}
+                            </button>
+                          </td>
+                          <td>
+                            <span
+                              className={`badge ${job.status === "published" ? "success-badge" : "neutral"}`}
+                            >
+                              {labels[job.status]}
+                            </span>
+                          </td>
+                          <td>{job.category_name}</td>
+                          <td>
+                            {job.published_url ? (
+                              <a
+                                href={job.published_url}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                블로그 바로가기 ↗
+                              </a>
+                            ) : (
+                              "—"
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          )}
           <footer className="page-footer">
-            NAVER BLOG AUTO{" "}
+            NAVER BLOG AUTO
             <span>
-              콘텐츠 수집 · AI 글 작성 · 자동 발행은 다음 개발 단계에서
-              연결됩니다.
+              확인되지 않은 사실은 쓰지 않고, 불명확한 발행은 다시 실행하지
+              않습니다.
             </span>
           </footer>
         </div>
       </main>
     </div>
+  );
+}
+function JobPanel({
+  detail,
+  busy,
+  publishingEnabled,
+  run,
+  selectJob,
+  showNaver,
+}: {
+  detail: Detail;
+  busy: boolean;
+  publishingEnabled: boolean;
+  run: (action: () => Promise<void>) => Promise<boolean>;
+  selectJob: (id: string) => void;
+  showNaver: () => void;
+}) {
+  const { job, assets } = detail;
+  const [publishedUrl, setPublishedUrl] = useState("");
+  const [allPhotos, setAllPhotos] = useState(false);
+  const [uploadRights, setUploadRights] = useState(false);
+  const uploadRef = useRef<HTMLInputElement>(null);
+  const progressing = [
+    "uploading",
+    "queued",
+    "extracting",
+    "processing",
+    "writing",
+    "publishing",
+    "preparing_editor",
+  ].includes(job.status);
+  return (
+    <section className="card job-panel">
+      <div className="section-heading">
+        <div>
+          <span className="step">02 / YOUR STORY</span>
+          <h2>작업 진행 상태</h2>
+        </div>
+        <span className="badge neutral">{labels[job.status]}</span>
+      </div>
+      <div className="info-box" role="status">
+        {job.message || "작업을 준비하고 있습니다."}
+      </div>
+      <p className="hint">기존 블로그 비교: {detail.history.message}</p>
+      {progressing && (
+        <p className="processing-indicator">
+          작업을 진행 중입니다. 이 페이지를 닫아도 기록은 유지됩니다.
+        </p>
+      )}
+      {!!assets.length && (
+        <div className="photo-grid">
+          {assets.map((asset) => (
+            <figure key={asset.id}>
+              <img
+                src={asset.url}
+                alt={`사진 ${asset.ordinal + 1}`}
+                loading="lazy"
+              />
+              <figcaption>
+                사진 {asset.ordinal + 1} ·{" "}
+                {asset.upscaled
+                  ? `${asset.width * 2} × ${asset.height * 2} · 2배 확대`
+                  : `${asset.width} × ${asset.height} · 원본`}
+              </figcaption>
+              <a
+                className="link-button"
+                href={`${asset.url}?variant=original`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                원본 보기
+              </a>
+            </figure>
+          ))}
+        </div>
+      )}
+      {job.status === "waiting_images" && (
+        <div className="fallback-panel">
+          <h3>원본 사진으로 이어가기</h3>
+          {!!assets.length && (
+            <>
+              <label className="check-label">
+                <input
+                  type="checkbox"
+                  checked={allPhotos}
+                  onChange={(event) => setAllPhotos(event.target.checked)}
+                />
+                원본 게시물의 모든 사진이 순서대로 포함됐는지 확인했습니다.
+              </label>
+              <button
+                className="secondary-button"
+                disabled={busy || !allPhotos}
+                onClick={() =>
+                  void run(async () => {
+                    await api(
+                      `/jobs/${job.id}/confirm-photos`,
+                      post({ allPhotosConfirmed: true }),
+                    );
+                  })
+                }
+              >
+                이 사진으로 계속
+              </button>
+            </>
+          )}
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void run(async () => {
+                const body = new FormData();
+                for (const file of Array.from(uploadRef.current?.files || []))
+                  body.append("images", file);
+                body.set("rightsConfirmed", String(uploadRights));
+                await api(`/jobs/${job.id}/upload`, { method: "POST", body });
+              });
+            }}
+          >
+            <label htmlFor={`missing-photos-${job.id}`}>
+              원본 사진 추가 업로드
+            </label>
+            <input
+              ref={uploadRef}
+              id={`missing-photos-${job.id}`}
+              type="file"
+              multiple
+              required
+              accept="image/jpeg,image/png,image/webp"
+            />
+            <label className="check-label">
+              <input
+                type="checkbox"
+                required
+                checked={uploadRights}
+                onChange={(event) => setUploadRights(event.target.checked)}
+              />
+              사용 권한이 있는 전체 원본 사진을 준비했습니다.
+            </label>
+            <button className="primary-button" disabled={busy || !uploadRights}>
+              사진 업로드 후 계속
+            </button>
+          </form>
+        </div>
+      )}
+      {job.duplicate_matches.length > 0 && (
+        <div className="duplicate-list">
+          <h3>중복 검사 결과</h3>
+          {job.duplicate_matches.map((match, index) => (
+            <div key={index}>
+              <p>{match.reason}</p>
+              {match.postUrl && (
+                <a
+                  className="link-button"
+                  href={match.postUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  기존 네이버 게시물 보기 ↗
+                </a>
+              )}
+              {match.jobId && (
+                <button
+                  className="link-button"
+                  onClick={() => selectJob(match.jobId!)}
+                >
+                  사진을 사용한 기존 작업 보기
+                </button>
+              )}
+            </div>
+          ))}
+          <p className="hint">
+            유사도 비교는 크기 변경을 고려하지만 모든 크롭·필터를 판별하지는
+            못합니다. 오탐 가능성이 있는 결과도 자동 재발행하지 않습니다.
+          </p>
+        </div>
+      )}
+      {["awaiting_ai", "failed"].includes(job.status) && (
+        <button
+          className="secondary-button"
+          disabled={busy}
+          onClick={() =>
+            void run(async () => {
+              await api(`/jobs/${job.id}/retry`, post());
+            })
+          }
+        >
+          같은 작업 재시도
+        </button>
+      )}
+      {[
+        "awaiting_ai",
+        "failed",
+        "ready",
+        "manual_completion",
+        "verification_required",
+        "published",
+      ].includes(job.status) &&
+        assets.every((asset) => asset.upscaled) &&
+        !!assets.length && (
+          <DraftPreview
+            detail={detail}
+            busy={busy}
+            onSave={(draft) =>
+              run(async () => {
+                await api(`/jobs/${job.id}/draft`, post(draft));
+              })
+            }
+          />
+        )}
+      {job.draft && (
+        <div className="button-row action-bar">
+          <a className="primary-button" href={`/api/jobs/${job.id}/export`}>
+            본문과 확대 사진 다운로드
+          </a>
+          {["ready", "manual_completion"].includes(job.status) && (
+            <>
+              <button
+                className="secondary-button"
+                disabled={busy || !job.blog_id}
+                onClick={() =>
+                  void run(async () => {
+                    await api(`/jobs/${job.id}/editor`, post());
+                    showNaver();
+                  })
+                }
+              >
+                네이버 공식 편집기에서 완료
+              </button>
+              <button
+                className="secondary-button"
+                disabled={busy || !publishingEnabled}
+                onClick={() =>
+                  void run(async () => {
+                    await api(
+                      `/jobs/${job.id}/publish`,
+                      post({ automaticPublishingEnabled: true }),
+                    );
+                  })
+                }
+              >
+                자동 발행
+              </button>
+            </>
+          )}
+        </div>
+      )}
+      {["ready", "manual_completion", "verification_required"].includes(
+        job.status,
+      ) &&
+        job.draft && (
+          <form
+            className="publication-confirm"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void run(async () => {
+                await api(
+                  `/jobs/${job.id}/confirm-published`,
+                  post({ url: publishedUrl }),
+                );
+              });
+            }}
+          >
+            <label htmlFor={`published-url-${job.id}`}>
+              수동 완료 후 실제 네이버 게시물 URL
+            </label>
+            <input
+              id={`published-url-${job.id}`}
+              type="url"
+              required
+              value={publishedUrl}
+              onChange={(event) => setPublishedUrl(event.target.value)}
+              placeholder="https://blog.naver.com/내블로그/게시물번호"
+            />
+            <p className="hint">
+              네이버에 연결된 상태에서 제목·본문·사진을 조회해 발행 결과를
+              확인합니다. 확인 전에는 같은 글을 다시 발행하지 마세요.
+            </p>
+            <button className="secondary-button" disabled={busy}>
+              기존 발행 결과 확인
+            </button>
+          </form>
+        )}
+      {job.published_url && (
+        <a
+          className="primary-button"
+          href={job.published_url}
+          target="_blank"
+          rel="noreferrer"
+        >
+          발행된 블로그 바로가기 ↗
+        </a>
+      )}
+      <details className="event-log">
+        <summary>작업 기록 확인</summary>
+        <ol>
+          {detail.events.map((event, index) => (
+            <li key={index}>
+              <span>
+                {new Date(event.created_at).toLocaleString("ko-KR", {
+                  timeZone: "Asia/Seoul",
+                })}
+              </span>
+              <p>{event.message}</p>
+            </li>
+          ))}
+        </ol>
+      </details>
+    </section>
   );
 }

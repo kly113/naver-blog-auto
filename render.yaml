@@ -1,0 +1,51 @@
+# One owner per deployment. Browser, cookies, DB and original photos stay on the private worker.
+services:
+  - type: pserv
+    name: naver-blog-worker
+    runtime: docker
+    plan: standard
+    region: singapore
+    branch: feat/admin-automation-foundation
+    autoDeployTrigger: off
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    envVars:
+      - key: PORT
+        value: "4000"
+      - key: DATA_DIR
+        value: /var/lib/blog-worker
+      - key: WORKER_AUTH_TOKEN
+        generateValue: true
+      - key: SESSION_ENCRYPTION_KEY
+        generateValue: true
+      - key: APP_OWNER_PASSWORD
+        sync: false
+      - key: BLOG_AI_API_KEY
+        sync: false
+      - key: NAVER_AUTOPUBLISH_VERIFIED
+        value: "false"
+    disk:
+      name: blog-private-data
+      mountPath: /var/lib/blog-worker
+      sizeGB: 10
+  - type: web
+    name: naver-blog-studio
+    runtime: docker
+    plan: starter
+    region: singapore
+    branch: feat/admin-automation-foundation
+    autoDeployTrigger: off
+    dockerfilePath: ./deploy/Web.Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: WORKER_URL
+        fromService:
+          type: pserv
+          name: naver-blog-worker
+          property: hostport
+      - key: WORKER_AUTH_TOKEN
+        fromService:
+          type: pserv
+          name: naver-blog-worker
+          envVarKey: WORKER_AUTH_TOKEN

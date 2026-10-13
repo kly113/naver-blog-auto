@@ -22,10 +22,18 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "npm run dev -- --port 3100",
+    command: "npm run dev:all -- --port 3100",
     url: "http://127.0.0.1:3100",
     reuseExistingServer: false,
     timeout: 120_000,
-    env: { DATA_DIR: dataDir, NEXT_TELEMETRY_DISABLED: "1" },
+    env: {
+      DATA_DIR: dataDir,
+      NEXT_TELEMETRY_DISABLED: "1",
+      APP_OWNER_PASSWORD: "e2e-owner-password-only",
+      WORKER_PORT: "4100",
+      BLOG_AI_API_KEY: "",
+      OPENAI_API_KEY: "",
+      NAVER_AUTOPUBLISH_VERIFIED: "false",
+    },
   },
 });
