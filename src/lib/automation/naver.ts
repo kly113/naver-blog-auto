@@ -4,11 +4,20 @@ import { chromium, type BrowserContext } from "playwright";
 export async function createNaverBrowser(): Promise<BrowserContext> {
   const browser = await chromium.launch({
     headless: true,
-    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,
+    executablePath:
+      process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,
   });
   try {
-    const context = await browser.newContext({ locale: "ko-KR", timezoneId: "Asia/Seoul" });
-    context.on("close", () => { void browser.close(); });
+    const context = await browser.newContext({
+      locale: "ko-KR",
+      timezoneId: "Asia/Seoul",
+    });
+    context.on("close", () => {
+      void browser.close();
+    });
     return context;
-  } catch (error) { await browser.close(); throw error; }
+  } catch (error) {
+    await browser.close();
+    throw error;
+  }
 }

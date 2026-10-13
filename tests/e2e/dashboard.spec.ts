@@ -1,36 +1,68 @@
 import { test, expect } from "@playwright/test";
 import sharp from "sharp";
 
-test("admin workflow persists profile, rejects duplicate links and images, and fits mobile", async ({ page }) => {
+test("admin workflow persists profile, rejects duplicate links and images, and fits mobile", async ({
+  page,
+}) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "콘텐츠 관리", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "콘텐츠 등록" })).toBeDisabled();
+  await expect(
+    page.getByRole("heading", { name: "콘텐츠 관리", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "콘텐츠 등록" }),
+  ).toBeDisabled();
   await page.getByRole("button", { name: "블로그 연결", exact: true }).click();
   await page.getByLabel("블로그 이름", { exact: true }).fill("여행 노트");
   await page.getByLabel("블로그 ID", { exact: true }).fill("travel_note");
   await page.getByLabel("카테고리 직접 등록").fill("여행, 일상");
   await page.getByLabel("기본 카테고리", { exact: true }).selectOption("여행");
   await page.getByRole("button", { name: "블로그 설정 저장" }).click();
-  await expect(page.getByRole("status")).toContainText("블로그 설정을 저장했습니다");
+  await expect(page.getByRole("status")).toContainText(
+    "블로그 설정을 저장했습니다",
+  );
   await page.reload();
   await expect(page.getByText("여행 노트 · 설정 등록됨")).toBeVisible();
   await expect(page.getByText("로그인 대기", { exact: true })).toBeVisible();
-  await page.getByLabel("인스타그램 URL", { exact: true }).fill("https://instagram.com/p/TEST_123/?utm_source=copy");
+  await page
+    .getByLabel("인스타그램 URL", { exact: true })
+    .fill("https://instagram.com/p/TEST_123/?utm_source=copy");
   await page.getByRole("button", { name: "콘텐츠 등록" }).click();
-  await expect(page.getByRole("link", { name: "https://www.instagram.com/p/TEST_123/" })).toBeVisible();
-  await page.getByLabel("인스타그램 URL", { exact: true }).fill("https://www.instagram.com/p/TEST_123/");
+  await expect(
+    page.getByRole("link", { name: "https://www.instagram.com/p/TEST_123/" }),
+  ).toBeVisible();
+  await page
+    .getByLabel("인스타그램 URL", { exact: true })
+    .fill("https://www.instagram.com/p/TEST_123/");
   await page.getByRole("button", { name: "콘텐츠 등록" }).click();
-  await expect(page.getByRole("alert").filter({ hasText: "이미 등록한 인스타그램" })).toBeVisible();
-  const buffer = await sharp({ create: { width: 10, height: 8, channels: 3, background: "green" } }).png().toBuffer();
-  await page.getByLabel("검사할 이미지").setInputFiles({ name: "photo.png", mimeType: "image/png", buffer });
+  await expect(
+    page.getByRole("alert").filter({ hasText: "이미 등록한 인스타그램" }),
+  ).toBeVisible();
+  const buffer = await sharp({
+    create: { width: 10, height: 8, channels: 3, background: "green" },
+  })
+    .png()
+    .toBuffer();
+  await page
+    .getByLabel("검사할 이미지")
+    .setInputFiles({ name: "photo.png", mimeType: "image/png", buffer });
   await page.getByRole("button", { name: "검사 및 등록" }).click();
   await expect(page.getByText("photo.png", { exact: true })).toBeVisible();
-  await page.getByLabel("검사할 이미지").setInputFiles({ name: "duplicate.png", mimeType: "image/png", buffer });
+  await page
+    .getByLabel("검사할 이미지")
+    .setInputFiles({ name: "duplicate.png", mimeType: "image/png", buffer });
   await page.getByRole("button", { name: "검사 및 등록" }).click();
-  await expect(page.getByRole("alert").filter({ hasText: "이미 등록한 이미지" })).toBeVisible();
+  await expect(
+    page.getByRole("alert").filter({ hasText: "이미 등록한 이미지" }),
+  ).toBeVisible();
   await page.reload();
-  await expect(page.getByRole("link", { name: "https://www.instagram.com/p/TEST_123/" })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "https://www.instagram.com/p/TEST_123/" }),
+  ).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("button", { name: "콘텐츠 등록" })).toBeVisible();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
 });
